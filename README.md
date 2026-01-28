@@ -26,26 +26,34 @@ By completing these tutorials, you will:
 | 05 | [Production-Ready Patterns](./05-Production-Ready-Patterns.py) | 🤖 Predictive Optimization, 💻 Serverless, 🧊 Iceberg tables, governance | ~60 min |
 | 06 | [Lakeflow Connect & Pipelines](./06-Lakeflow-Connect-and-Pipelines.py) | 🌊 Lakeflow Connect, Spark Declarative Pipelines, medallion architecture | ~60 min |
 
-## 💰 Dataset: Lending Club Loan Data
+## 🛒 Dataset: Retail-Org E-commerce Data
 
-These tutorials use **real financial data** from Lending Club, featuring:
+These tutorials use **real e-commerce data** from Databricks' built-in retail-org dataset, featuring:
 
-- **14,705 loan records** with risk indicators
-- **Loan amounts, terms, and interest rates**
-- **Borrower information** (income, employment, credit history)
-- **Risk classification** (safe vs. risky loans)
+- **100K+ sales orders** with customer and product details
+- **Order details** (order_number, order_datetime, products ordered)
+- **Customer information** (customer_id, name, state, city, loyalty_segment)
+- **Product data** (product names, prices, quantities)
 
 **Why this dataset?**
 - ✅ Built-in to Databricks (no download required)
-- ✅ Real-world financial data
-- ✅ Perfect size for learning (~1.5 MB)
-- ✅ Rich features for analysis (numeric, categorical, dates)
-- ✅ Used in 50+ official Databricks tutorials
+- ✅ Real-world e-commerce/retail data
+- ✅ Perfect size for learning (~50MB)
+- ✅ Demonstrates nested JSON structures and data flattening
+- ✅ Commonly used in official Databricks tutorials
 
-**Access Path:**
+**Access Paths:**
 ```python
-/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet
+# Sales orders (JSON format)
+/databricks-datasets/retail-org/sales_orders/
+
+# Customer data (CSV format)
+/databricks-datasets/retail-org/customers/
 ```
+
+**Schema Overview:**
+- Sales Orders: `order_number`, `order_datetime`, `customer_id`, `customer_name`, `ordered_products` (array)
+- Customers: `customer_id`, `customer_name`, `state`, `city`, `loyalty_segment`
 
 ## 🚀 Getting Started
 
@@ -151,7 +159,7 @@ spark.conf.set("spark.sql.shuffle.partitions", "1")
 ### **File Paths**
 All notebooks use temporary paths for demos:
 ```python
-/tmp/delta/loan_data/
+/tmp/delta/retail_orders/
 ```
 
 **Production:** Use Unity Catalog managed tables or external locations.
@@ -172,7 +180,7 @@ This project is licensed under the MIT License - feel free to use for learning a
 
 - **Databricks** for excellent documentation and sample datasets
 - **Delta Lake Community** for open-source contributions
-- **Learning Spark V2** for the loan dataset
+- **Databricks** for the retail-org sample dataset
 
 ## 💬 Community & Support
 
