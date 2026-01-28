@@ -35,6 +35,50 @@
 
 # COMMAND ----------
 
+# DBTITLE 1,Setup: Load and Prepare Data for This Tutorial
+from pyspark.sql.functions import explode, col, from_unixtime, sum as _sum
+
+sales_raw = spark.read.json("/databricks-datasets/retail-org/sales_orders/")
+customers = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .load("/databricks-datasets/retail-org/customers/")
+)
+
+sales_with_customers = (
+    sales_raw.join(customers, on=["customer_id", "customer_name"], how="left")
+    .withColumn(
+        "order_datetime_ts",
+        from_unixtime(col("order_datetime").cast("long")).cast("timestamp"),
+    )
+    .withColumn(
+        "order_date", from_unixtime(col("order_datetime").cast("long")).cast("date")
+    )
+)
+
+orders_exploded = sales_with_customers.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime_ts",
+    "order_date",
+    "state",
+    "city",
+    "loyalty_segment",
+    explode("ordered_products").alias("product"),
+).select(
+    "*",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+print("✅ Data loaded and prepared")
+print(f"📊 Total orders: {sales_with_customers.count():,}")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## 🌊 Part 1: Understanding Lakeflow
 # MAGIC

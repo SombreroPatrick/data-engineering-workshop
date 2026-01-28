@@ -42,9 +42,6 @@
 # Reduce shuffle partitions for faster demos
 spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-# Enable adaptive query execution
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-
 print("✅ Spark configured for demo environment")
 
 # COMMAND ----------
@@ -56,6 +53,58 @@ import shutil
 import os
 
 print("✅ Libraries imported")
+
+# COMMAND ----------
+
+# DBTITLE 1,Setup: Load and Prepare Data for This Tutorial
+# This creates a clean, easy-to-use table for teaching concepts
+
+from pyspark.sql.functions import explode, col, from_unixtime, sum as _sum
+
+# Load sales orders
+sales_raw = spark.read.json("/databricks-datasets/retail-org/sales_orders/")
+
+# Load customers
+customers = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .load("/databricks-datasets/retail-org/customers/")
+)
+
+# Join and create clean view
+sales_with_customers = (
+    sales_raw.join(customers, on=["customer_id", "customer_name"], how="left")
+    .withColumn(
+        "order_datetime_ts",
+        from_unixtime(col("order_datetime").cast("long")).cast("timestamp"),
+    )
+    .withColumn(
+        "order_date", from_unixtime(col("order_datetime").cast("long")).cast("date")
+    )
+)
+
+# Create flattened product view for easy analysis
+orders_exploded = sales_with_customers.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime_ts",
+    "order_date",
+    "state",
+    "city",
+    "loyalty_segment",
+    explode("ordered_products").alias("product"),
+).select(
+    "*",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+print("✅ Data loaded and prepared")
+print(f"📊 Total orders: {sales_with_customers.count():,}")
+display(orders_exploded.limit(5))
 
 # COMMAND ----------
 
@@ -114,24 +163,16 @@ print("✅ Libraries imported")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 📥 Load Source Data
+# MAGIC ## 📥 Using Our Prepared Data
 # MAGIC
-# MAGIC Let's load our Lending Club dataset to convert it to Delta format:
+# MAGIC We've already loaded and prepared the retail orders data in the setup cell above. Let's use `orders_exploded` for all our examples:
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Parquet Data
-# Load the source Parquet file
-source_path = "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
-df = spark.read.format("parquet").load(source_path)
-
-print(f"✅ Loaded {df.count():,} records from Parquet")
-print(f"✅ Columns: {len(df.columns)}")
-
-# COMMAND ----------
-
-# DBTITLE 1,Preview Source Data
-display(df.limit(5))
+# DBTITLE 1,Preview Prepared Data
+print(f"✅ Loaded {orders_exploded.count():,} records")
+print(f"✅ Columns: {len(orders_exploded.columns)}")
+display(orders_exploded.limit(5))
 
 # COMMAND ----------
 
@@ -144,13 +185,13 @@ display(df.limit(5))
 
 # DBTITLE 1,Create Delta Table from DataFrame
 # Define the Delta table path
-delta_path = "/tmp/delta/loan_data"
+delta_path = "/tmp/delta/orders_data"
 
 # Remove existing data if present (for demo purposes)
 dbutils.fs.rm(delta_path, recurse=True)
 
 # Write DataFrame as Delta table
-df.write.format("delta").mode("overwrite").save(delta_path)
+orders_exploded.write.format("delta").mode("overwrite").save(delta_path)
 
 print(f"✅ Delta table created at: {delta_path}")
 
@@ -169,13 +210,13 @@ print(f"✅ Delta table created at: {delta_path}")
 
 # DBTITLE 1,Create Managed Delta Table
 # Create a managed table (stored in Unity Catalog)
-table_name = "loan_data_delta"
+table_name = "orders_data_delta"
 
 # Drop table if exists (for demo purposes)
 spark.sql(f"DROP TABLE IF EXISTS {table_name}")
 
 # Create managed Delta table
-df.write.format("delta").mode("overwrite").saveAsTable(table_name)
+orders_exploded.write.format("delta").mode("overwrite").saveAsTable(table_name)
 
 print(f"✅ Managed Delta table created: {table_name}")
 
@@ -225,12 +266,13 @@ print(f"✅ Read {delta_df_table.count():,} records from managed table")
 # Use SQL to query the Delta table
 result = spark.sql(f"""
     SELECT 
-        addr_state,
-        COUNT(*) as loan_count,
-        ROUND(AVG(loan_amnt), 2) as avg_loan_amount
+        state,
+        COUNT(*) as order_count,
+        ROUND(AVG(line_total), 2) as avg_order_value,
+        ROUND(SUM(line_total), 2) as total_revenue
     FROM {table_name}
-    GROUP BY addr_state
-    ORDER BY loan_count DESC
+    GROUP BY state
+    ORDER BY total_revenue DESC
     LIMIT 10
 """)
 
@@ -246,73 +288,59 @@ display(result)
 # COMMAND ----------
 
 # DBTITLE 1,Create New Records to Insert
-# Create sample new loan records
+# Create sample new order records
 from pyspark.sql import Row
+from datetime import datetime
 
-new_loans = spark.createDataFrame(
+new_orders = spark.createDataFrame(
     [
         Row(
-            loan_amnt=15000,
-            funded_amnt=15000,
-            paid_amnt=0.0,
-            addr_state="NY",
-            closed="false",
-            annual_inc=85000.0,
-            emp_length=5.0,
-            dti=15.5,
-            delinq_2yrs=0.0,
-            revol_util=45.2,
-            total_acc=12.0,
-            credit_length_in_years=8.0,
-            term=" 36 months",
-            home_ownership="RENT",
-            purpose="debt_consolidation",
-            verification_status="Verified",
-            application_type="Individual",
+            order_number=999001,
+            customer_id=1001,
+            customer_name="John Smith",
+            order_datetime_ts=datetime.now(),
+            order_date=datetime.now().date(),
+            state="NY",
+            city="New York",
+            loyalty_segment="Gold",
+            product_name="Laptop",
+            price=1200.0,
+            quantity=1,
+            line_total=1200.0,
         ),
         Row(
-            loan_amnt=25000,
-            funded_amnt=25000,
-            paid_amnt=0.0,
-            addr_state="CA",
-            closed="false",
-            annual_inc=120000.0,
-            emp_length=10.0,
-            dti=12.3,
-            delinq_2yrs=0.0,
-            revol_util=30.5,
-            total_acc=18.0,
-            credit_length_in_years=12.0,
-            term=" 60 months",
-            home_ownership="MORTGAGE",
-            purpose="home_improvement",
-            verification_status="Verified",
-            application_type="Individual",
+            order_number=999002,
+            customer_id=1002,
+            customer_name="Jane Doe",
+            order_datetime_ts=datetime.now(),
+            order_date=datetime.now().date(),
+            state="CA",
+            city="San Francisco",
+            loyalty_segment="Platinum",
+            product_name="Monitor",
+            price=350.0,
+            quantity=2,
+            line_total=700.0,
         ),
         Row(
-            loan_amnt=10000,
-            funded_amnt=10000,
-            paid_amnt=0.0,
-            addr_state="TX",
-            closed="false",
-            annual_inc=65000.0,
-            emp_length=3.0,
-            dti=18.7,
-            delinq_2yrs=1.0,
-            revol_util=55.8,
-            total_acc=8.0,
-            credit_length_in_years=5.0,
-            term=" 36 months",
-            home_ownership="OWN",
-            purpose="credit_card",
-            verification_status="Not Verified",
-            application_type="Individual",
+            order_number=999003,
+            customer_id=1003,
+            customer_name="Bob Johnson",
+            order_datetime_ts=datetime.now(),
+            order_date=datetime.now().date(),
+            state="TX",
+            city="Austin",
+            loyalty_segment="Silver",
+            product_name="Keyboard",
+            price=85.0,
+            quantity=1,
+            line_total=85.0,
         ),
     ]
 )
 
-print(f"✅ Created {new_loans.count()} new loan records")
-display(new_loans)
+print(f"✅ Created {new_orders.count()} new order records")
+display(new_orders)
 
 # COMMAND ----------
 
@@ -321,7 +349,7 @@ display(new_loans)
 count_before = spark.table(table_name).count()
 
 # Append new records
-new_loans.write.format("delta").mode("append").saveAsTable(table_name)
+new_orders.write.format("delta").mode("append").saveAsTable(table_name)
 
 # Get count after insert
 count_after = spark.table(table_name).count()
@@ -342,9 +370,8 @@ print(f"✅ Records inserted: {count_after - count_before}")
 spark.sql(f"""
     INSERT INTO {table_name}
     VALUES (
-        12000, 12000, 0.0, 'FL', 'false', 75000.0, 7.0, 14.2, 0.0, 
-        40.5, 15.0, 9.0, ' 36 months', 'RENT', 'car', 
-        'Verified', 'Individual'
+        999004, 1004, 'Alice Brown', current_timestamp(), current_date(), 'FL', 'Miami', 'Gold',
+        'Mouse', 45.0, 1, 45.0
     )
 """)
 
@@ -363,22 +390,22 @@ print("✅ Record inserted via SQL")
 # Load Delta table for updates
 delta_table = DeltaTable.forName(spark, table_name)
 
-# Update paid_amnt for loans from California
+# Update line_total for orders from California (apply 10% discount)
 delta_table.update(
-    condition="addr_state = 'CA' AND paid_amnt = 0",
-    set={"paid_amnt": "funded_amnt * 0.25"},  # Simulate 25% repayment
+    condition="state = 'CA'",
+    set={"line_total": "line_total * 0.9"},
 )
 
-print("✅ Updated CA loans with 25% repayment")
+print("✅ Updated CA orders with 10% discount")
 
 # COMMAND ----------
 
 # DBTITLE 1,Verify Updates
 # Check updated records
 updated_records = spark.sql(f"""
-    SELECT addr_state, loan_amnt, funded_amnt, paid_amnt
+    SELECT state, product_name, price, quantity, line_total
     FROM {table_name}
-    WHERE addr_state = 'CA' AND paid_amnt > 0
+    WHERE state = 'CA'
     LIMIT 10
 """)
 
@@ -395,11 +422,11 @@ display(updated_records)
 # Update using SQL syntax
 spark.sql(f"""
     UPDATE {table_name}
-    SET paid_amnt = funded_amnt * 0.50
-    WHERE addr_state = 'NY' AND paid_amnt = 0
+    SET line_total = line_total * 0.95
+    WHERE state = 'NY'
 """)
 
-print("✅ Updated NY loans with 50% repayment")
+print("✅ Updated NY orders with 5% discount")
 
 # COMMAND ----------
 
@@ -414,8 +441,8 @@ print("✅ Updated NY loans with 50% repayment")
 # Count before delete
 count_before = spark.table(table_name).count()
 
-# Delete loans with high delinquency
-delta_table.delete("delinq_2yrs > 5")
+# Delete orders with very low line totals (< $10)
+delta_table.delete("line_total < 10")
 
 # Count after delete
 count_after = spark.table(table_name).count()
@@ -435,10 +462,10 @@ print(f"✅ Records deleted: {count_before - count_after}")
 # Delete using SQL syntax
 spark.sql(f"""
     DELETE FROM {table_name}
-    WHERE loan_amnt < 1000
+    WHERE price < 20
 """)
 
-print("✅ Deleted loans under $1,000")
+print("✅ Deleted products under $20")
 
 # COMMAND ----------
 
@@ -468,45 +495,33 @@ print("✅ Deleted loans under $1,000")
 # Create a dataset with updates and new records
 updates = spark.createDataFrame(
     [
-        # Update existing loan (change paid_amnt)
         Row(
-            loan_amnt=15000,
-            funded_amnt=15000,
-            paid_amnt=7500.0,
-            addr_state="NY",
-            closed="false",
-            annual_inc=85000.0,
-            emp_length=5.0,
-            dti=15.5,
-            delinq_2yrs=0.0,
-            revol_util=45.2,
-            total_acc=12.0,
-            credit_length_in_years=8.0,
-            term=" 36 months",
-            home_ownership="RENT",
-            purpose="debt_consolidation",
-            verification_status="Verified",
-            application_type="Individual",
+            order_number=999001,
+            customer_id=1001,
+            customer_name="John Smith",
+            order_datetime_ts=datetime.now(),
+            order_date=datetime.now().date(),
+            state="NY",
+            city="New York",
+            loyalty_segment="Platinum",
+            product_name="Laptop",
+            price=1100.0,
+            quantity=1,
+            line_total=1100.0,
         ),
-        # New loan record
         Row(
-            loan_amnt=20000,
-            funded_amnt=20000,
-            paid_amnt=0.0,
-            addr_state="WA",
-            closed="false",
-            annual_inc=95000.0,
-            emp_length=8.0,
-            dti=16.2,
-            delinq_2yrs=0.0,
-            revol_util=38.5,
-            total_acc=14.0,
-            credit_length_in_years=10.0,
-            term=" 60 months",
-            home_ownership="MORTGAGE",
-            purpose="major_purchase",
-            verification_status="Verified",
-            application_type="Individual",
+            order_number=999005,
+            customer_id=1005,
+            customer_name="Carol White",
+            order_datetime_ts=datetime.now(),
+            order_date=datetime.now().date(),
+            state="WA",
+            city="Seattle",
+            loyalty_segment="Gold",
+            product_name="Tablet",
+            price=500.0,
+            quantity=1,
+            line_total=500.0,
         ),
     ]
 )
@@ -523,9 +538,9 @@ count_before = spark.table(table_name).count()
 # Perform merge (upsert)
 delta_table.alias("target").merge(
     updates.alias("source"),
-    "target.loan_amnt = source.loan_amnt AND target.addr_state = source.addr_state",
+    "target.order_number = source.order_number AND target.state = source.state",
 ).whenMatchedUpdate(
-    set={"paid_amnt": "source.paid_amnt", "closed": "source.closed"}
+    set={"loyalty_segment": "source.loyalty_segment", "line_total": "source.line_total"}
 ).whenNotMatchedInsertAll().execute()
 
 # Count after merge
@@ -544,16 +559,16 @@ print(f"✅ Records inserted: {count_after - count_before}")
 
 # DBTITLE 1,MERGE Using SQL
 # Create a temporary view for the source data
-updates.createOrReplaceTempView("loan_updates")
+updates.createOrReplaceTempView("order_updates")
 
 # Perform merge using SQL
 spark.sql(f"""
     MERGE INTO {table_name} AS target
-    USING loan_updates AS source
-    ON target.loan_amnt = source.loan_amnt 
-       AND target.addr_state = source.addr_state
+    USING order_updates AS source
+    ON target.order_number = source.order_number 
+       AND target.state = source.state
     WHEN MATCHED THEN
-        UPDATE SET target.paid_amnt = source.paid_amnt
+        UPDATE SET target.line_total = source.line_total
     WHEN NOT MATCHED THEN
         INSERT *
 """)

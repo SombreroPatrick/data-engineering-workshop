@@ -44,10 +44,6 @@
 # DBTITLE 1,Configure Spark for Production
 # Production-optimized settings
 spark.conf.set("spark.sql.shuffle.partitions", "auto")  # Let Spark decide
-spark.conf.set("spark.sql.adaptive.enabled", "true")  # Enable AQE
-spark.conf.set(
-    "spark.sql.adaptive.coalescePartitions.enabled", "true"
-)  # Coalesce partitions
 
 print("✅ Spark configured for production environment")
 
@@ -63,12 +59,47 @@ print("✅ Libraries imported")
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Source Data
-# Load the Lending Club dataset
-source_path = "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
-df = spark.read.format("parquet").load(source_path)
+# DBTITLE 1,Setup: Load and Prepare Data for This Tutorial
+from pyspark.sql.functions import explode, col, from_unixtime, sum as _sum
 
-print(f"✅ Loaded {df.count():,} records")
+sales_raw = spark.read.json("/databricks-datasets/retail-org/sales_orders/")
+customers = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .load("/databricks-datasets/retail-org/customers/")
+)
+
+sales_with_customers = (
+    sales_raw.join(customers, on=["customer_id", "customer_name"], how="left")
+    .withColumn(
+        "order_datetime_ts",
+        from_unixtime(col("order_datetime").cast("long")).cast("timestamp"),
+    )
+    .withColumn(
+        "order_date", from_unixtime(col("order_datetime").cast("long")).cast("date")
+    )
+)
+
+orders_exploded = sales_with_customers.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime_ts",
+    "order_date",
+    "state",
+    "city",
+    "loyalty_segment",
+    explode("ordered_products").alias("product"),
+).select(
+    "*",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+print("✅ Data loaded and prepared")
+print(f"📊 Total orders: {sales_with_customers.count():,}")
 
 # COMMAND ----------
 
@@ -133,10 +164,10 @@ print(f"✅ Loaded {df.count():,} records")
 
 # DBTITLE 1,Create Table for Predictive Optimization
 # Create a Delta table
-po_table = "loans_predictive_optimization"
+po_table = "orders_predictive_optimization"
 spark.sql(f"DROP TABLE IF EXISTS {po_table}")
 
-df.write.format("delta").mode("overwrite").saveAsTable(po_table)
+orders_exploded.write.format("delta").mode("overwrite").saveAsTable(po_table)
 
 print(f"✅ Created table: {po_table}")
 

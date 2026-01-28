@@ -44,9 +44,6 @@
 # Reduce shuffle partitions for faster demos
 spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-# Enable adaptive query execution
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-
 print("✅ Spark configured for demo environment")
 
 # COMMAND ----------
@@ -60,13 +57,47 @@ print("✅ Libraries imported")
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Source Data
-# Load the Lending Club dataset
-source_path = "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
-df = spark.read.format("parquet").load(source_path)
+# DBTITLE 1,Setup: Load and Prepare Data for This Tutorial
+from pyspark.sql.functions import explode, col, from_unixtime, sum as _sum
 
-print(f"✅ Loaded {df.count():,} records")
-print(f"✅ Columns: {len(df.columns)}")
+sales_raw = spark.read.json("/databricks-datasets/retail-org/sales_orders/")
+customers = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .load("/databricks-datasets/retail-org/customers/")
+)
+
+sales_with_customers = (
+    sales_raw.join(customers, on=["customer_id", "customer_name"], how="left")
+    .withColumn(
+        "order_datetime_ts",
+        from_unixtime(col("order_datetime").cast("long")).cast("timestamp"),
+    )
+    .withColumn(
+        "order_date", from_unixtime(col("order_datetime").cast("long")).cast("date")
+    )
+)
+
+orders_exploded = sales_with_customers.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime_ts",
+    "order_date",
+    "state",
+    "city",
+    "loyalty_segment",
+    explode("ordered_products").alias("product"),
+).select(
+    "*",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+print("✅ Data loaded and prepared")
+print(f"📊 Total orders: {sales_with_customers.count():,}")
 
 # COMMAND ----------
 
@@ -99,10 +130,10 @@ print(f"✅ Columns: {len(df.columns)}")
 
 # DBTITLE 1,Create Delta Table for Time Travel Demo
 # Create a Delta table
-table_name = "loans_time_travel"
+table_name = "orders_time_travel"
 spark.sql(f"DROP TABLE IF EXISTS {table_name}")
 
-df.write.format("delta").mode("overwrite").saveAsTable(table_name)
+orders_exploded.write.format("delta").mode("overwrite").saveAsTable(table_name)
 
 print(f"✅ Created table: {table_name}")
 print(f"✅ Version 0: {spark.table(table_name).count():,} records")
@@ -118,17 +149,17 @@ print(f"✅ Version 1: Inserted 100 records")
 # Version 2: Update records
 spark.sql(f"""
     UPDATE {table_name}
-    SET paid_amnt = funded_amnt * 0.5
-    WHERE addr_state = 'CA' AND paid_amnt = 0
+    SET line_total = line_total * 0.9
+    WHERE state = 'CA'
 """)
-print(f"✅ Version 2: Updated CA loans")
+print(f"✅ Version 2: Updated CA orders")
 
 # Version 3: Delete records
 spark.sql(f"""
     DELETE FROM {table_name}
-    WHERE loan_amnt < 1000
+    WHERE price < 20
 """)
-print(f"✅ Version 3: Deleted small loans")
+print(f"✅ Version 3: Deleted low-price products")
 
 # COMMAND ----------
 
@@ -274,29 +305,29 @@ display(spark.sql(f"DESCRIBE HISTORY {table_name}").limit(5))
 
 # DBTITLE 1,Create Table with Liquid Clustering
 # Create a new table with liquid clustering enabled
-clustered_table = "loans_clustered"
+clustered_table = "orders_clustered"
 spark.sql(f"DROP TABLE IF EXISTS {clustered_table}")
 
-# Create table with liquid clustering on state and loan amount
+# Create table with liquid clustering on state and product_name
 spark.sql(f"""
     CREATE TABLE {clustered_table}
     USING DELTA
-    CLUSTER BY (addr_state, loan_amnt)
+    CLUSTER BY (state, product_name)
     AS SELECT * FROM {table_name}
 """)
 
 print(f"✅ Created table with liquid clustering: {clustered_table}")
-print(f"✅ Clustered by: addr_state, loan_amnt")
+print(f"✅ Clustered by: state, product_name")
 
 # COMMAND ----------
 
 # DBTITLE 1,Enable Liquid Clustering on Existing Table
 # You can also enable liquid clustering on an existing table
-existing_table = "loans_existing"
+existing_table = "orders_existing"
 spark.sql(f"DROP TABLE IF EXISTS {existing_table}")
 
 # Create regular table first
-df.write.format("delta").mode("overwrite").saveAsTable(existing_table)
+orders_exploded.write.format("delta").mode("overwrite").saveAsTable(existing_table)
 
 # Enable liquid clustering
 spark.sql(f"""
@@ -307,11 +338,11 @@ spark.sql(f"""
 # Add clustering columns
 spark.sql(f"""
     ALTER TABLE {existing_table} 
-    CLUSTER BY (addr_state, term)
+    CLUSTER BY (state, loyalty_segment)
 """)
 
 print(f"✅ Enabled liquid clustering on existing table: {existing_table}")
-print(f"✅ Clustered by: addr_state, term")
+print(f"✅ Clustered by: state, loyalty_segment")
 
 # COMMAND ----------
 
@@ -380,7 +411,7 @@ display(
 
 # DBTITLE 1,Create Table with Automatic Liquid Clustering
 # Create table with automatic clustering (AI selects keys)
-auto_clustered_table = "loans_auto_clustered"
+auto_clustered_table = "orders_auto_clustered"
 spark.sql(f"DROP TABLE IF EXISTS {auto_clustered_table}")
 
 # Create table with CLUSTER BY AUTO
@@ -436,12 +467,12 @@ print("🤖 AI will optimize clustering based on query patterns")
 spark.sql(f"""
     ALTER TABLE {table_name}
     ADD COLUMNS (
-        risk_score DOUBLE COMMENT 'Calculated risk score',
+        discount_applied DOUBLE COMMENT 'Discount percentage applied',
         last_updated TIMESTAMP COMMENT 'Last update timestamp'
     )
 """)
 
-print("✅ Added columns: risk_score, last_updated")
+print("✅ Added columns: discount_applied, last_updated")
 
 # Verify new schema
 display(spark.sql(f"DESCRIBE {table_name}"))
@@ -449,11 +480,11 @@ display(spark.sql(f"DESCRIBE {table_name}"))
 # COMMAND ----------
 
 # DBTITLE 1,Update New Columns with Calculated Values
-# Populate the new risk_score column
+# Populate the new discount_applied column
 spark.sql(f"""
     UPDATE {table_name}
     SET 
-        risk_score = (dti * 0.3) + (delinq_2yrs * 10) + (revol_util * 0.2),
+        discount_applied = CASE WHEN state = 'CA' THEN 0.10 WHEN state = 'NY' THEN 0.05 ELSE 0.0 END,
         last_updated = current_timestamp()
 """)
 
@@ -462,7 +493,7 @@ print("✅ Populated new columns with calculated values")
 # Verify updates
 display(
     spark.sql(f"""
-    SELECT loan_amnt, dti, delinq_2yrs, revol_util, risk_score, last_updated
+    SELECT product_name, price, quantity, line_total, discount_applied, last_updated
     FROM {table_name}
     LIMIT 10
 """)
@@ -473,7 +504,7 @@ display(
 # DBTITLE 1,Merge Schema on Write
 # Create a DataFrame with additional columns
 extended_df = (
-    df.limit(10)
+    orders_exploded.limit(10)
     .withColumn("data_source", lit("external_api"))
     .withColumn("ingestion_date", current_date())
 )
@@ -536,7 +567,7 @@ print("✅ Updated column comments")
 # DBTITLE 1,Enable CDF on New Table
 # Create table with CDF enabled from the start
 spark.sql(f"""
-  CREATE OR REPLACE TABLE loans_cdf
+  CREATE OR REPLACE TABLE orders_cdf
   TBLPROPERTIES (delta.enableChangeDataFeed = true)
   AS SELECT * FROM {table_name} LIMIT 1000
 """)
@@ -560,32 +591,85 @@ print("⚠️ Important: Only changes AFTER enabling CDF are tracked")
 
 # DBTITLE 1,Perform Operations to Generate Change Data
 from pyspark.sql.functions import *
+from datetime import datetime
 
 # INSERT new records
 new_records = spark.createDataFrame(
     [
-        (99999, 25000, 24000, "NY", "36 months"),
-        (99998, 30000, 29500, "CA", "60 months"),
-        (99997, 15000, 14800, "TX", "36 months"),
+        (
+            999010,
+            1010,
+            "David Lee",
+            datetime.now(),
+            datetime.now().date(),
+            "WA",
+            "Tacoma",
+            "Gold",
+            "Headphones",
+            120.0,
+            1,
+            120.0,
+        ),
+        (
+            999011,
+            1011,
+            "Emma Davis",
+            datetime.now(),
+            datetime.now().date(),
+            "OR",
+            "Portland",
+            "Silver",
+            "Speaker",
+            80.0,
+            1,
+            80.0,
+        ),
+        (
+            999012,
+            1012,
+            "Frank Miller",
+            datetime.now(),
+            datetime.now().date(),
+            "CA",
+            "LA",
+            "Gold",
+            "Webcam",
+            60.0,
+            1,
+            60.0,
+        ),
     ],
-    ["loan_id", "loan_amnt", "funded_amnt", "addr_state", "term"],
+    [
+        "order_number",
+        "customer_id",
+        "customer_name",
+        "order_datetime_ts",
+        "order_date",
+        "state",
+        "city",
+        "loyalty_segment",
+        "product_name",
+        "price",
+        "quantity",
+        "line_total",
+    ],
 )
 
-new_records.write.format("delta").mode("append").saveAsTable("loans_cdf")
+new_records.write.format("delta").mode("append").saveAsTable("orders_cdf")
 print("✅ Inserted 3 new records")
 
 # UPDATE existing records
 spark.sql("""
-  UPDATE loans_cdf
-  SET funded_amnt = funded_amnt * 1.1
-  WHERE loan_id IN (99999, 99998)
+  UPDATE orders_cdf
+  SET line_total = line_total * 1.1
+  WHERE order_number IN (999010, 999011)
 """)
 print("✅ Updated 2 records")
 
 # DELETE a record
 spark.sql("""
-  DELETE FROM loans_cdf
-  WHERE loan_id = 99997
+  DELETE FROM orders_cdf
+  WHERE order_number = 999012
 """)
 print("✅ Deleted 1 record")
 
@@ -599,7 +683,7 @@ changes_df = (
     spark.read.format("delta")
     .option("readChangeFeed", "true")
     .option("startingVersion", 1)
-    .table("loans_cdf")
+    .table("orders_cdf")
 )
 
 print(f"📊 Total change records: {changes_df.count()}")
@@ -607,15 +691,15 @@ print(f"📊 Total change records: {changes_df.count()}")
 # Show changes with metadata
 display(
     changes_df.select(
-        "loan_id",
-        "loan_amnt",
-        "funded_amnt",
-        "addr_state",
-        "_change_type",  # Type of change
-        "_commit_version",  # Delta table version
-        "_commit_timestamp",  # When the change occurred
+        "order_number",
+        "customer_name",
+        "product_name",
+        "line_total",
+        "_change_type",
+        "_commit_version",
+        "_commit_timestamp",
     )
-    .orderBy("_commit_version", "loan_id")
+    .orderBy("_commit_version", "order_number")
     .limit(20)
 )
 
@@ -701,7 +785,7 @@ print(f"🗑️ Deletes: {deletes.count()}")
 # COMMAND ----------
 
 # DBTITLE 1,Cleanup
-spark.sql("DROP TABLE IF EXISTS loans_cdf")
+spark.sql("DROP TABLE IF EXISTS orders_cdf")
 print("✅ Cleanup complete")
 
 # COMMAND ----------

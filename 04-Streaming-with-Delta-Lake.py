@@ -43,9 +43,6 @@
 # Reduce shuffle partitions for faster demos
 spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-# Enable adaptive query execution
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-
 print("✅ Spark configured for streaming demo")
 
 # COMMAND ----------
@@ -57,6 +54,50 @@ from delta.tables import DeltaTable
 import time
 
 print("✅ Libraries imported")
+
+# COMMAND ----------
+
+# DBTITLE 1,Setup: Load and Prepare Data for This Tutorial
+from pyspark.sql.functions import explode, col, from_unixtime, sum as _sum
+
+sales_raw = spark.read.json("/databricks-datasets/retail-org/sales_orders/")
+customers = (
+    spark.read.format("csv")
+    .option("header", "true")
+    .load("/databricks-datasets/retail-org/customers/")
+)
+
+sales_with_customers = (
+    sales_raw.join(customers, on=["customer_id", "customer_name"], how="left")
+    .withColumn(
+        "order_datetime_ts",
+        from_unixtime(col("order_datetime").cast("long")).cast("timestamp"),
+    )
+    .withColumn(
+        "order_date", from_unixtime(col("order_datetime").cast("long")).cast("date")
+    )
+)
+
+orders_exploded = sales_with_customers.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime_ts",
+    "order_date",
+    "state",
+    "city",
+    "loyalty_segment",
+    explode("ordered_products").alias("product"),
+).select(
+    "*",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+print("✅ Data loaded and prepared")
+print(f"📊 Total orders: {sales_with_customers.count():,}")
 
 # COMMAND ----------
 
@@ -130,26 +171,22 @@ print(f"   Output: {output_path}")
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Source Data
-# Load the Lending Club dataset
-source_data_path = (
-    "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
-)
-df = spark.read.format("parquet").load(source_data_path)
+# DBTITLE 1,Prepare Data for Streaming Simulation
+# We've already loaded orders_exploded in the setup cell above
+# Now we'll use it to simulate a streaming source
 
-print(f"✅ Loaded {df.count():,} records for streaming simulation")
+print(f"✅ Using {orders_exploded.count():,} records for streaming simulation")
 
 # COMMAND ----------
 
 # DBTITLE 1,Write Data as JSON Files (Simulating Streaming Source)
 # Split data into batches and write as JSON files
 batch_size = 1000
-total_records = df.count()
 num_batches = 5
 
 for i in range(num_batches):
     batch_df = (
-        df.limit(batch_size)
+        orders_exploded.limit(batch_size)
         .withColumn("batch_id", lit(i))
         .withColumn("event_time", current_timestamp())
     )
@@ -168,25 +205,20 @@ for i in range(num_batches):
 
 # DBTITLE 1,Define Schema for Streaming Source
 # Define explicit schema (best practice for streaming)
-loan_schema = StructType(
+orders_schema = StructType(
     [
-        StructField("loan_amnt", IntegerType(), True),
-        StructField("funded_amnt", IntegerType(), True),
-        StructField("paid_amnt", DoubleType(), True),
-        StructField("addr_state", StringType(), True),
-        StructField("closed", StringType(), True),
-        StructField("annual_inc", DoubleType(), True),
-        StructField("emp_length", DoubleType(), True),
-        StructField("dti", DoubleType(), True),
-        StructField("delinq_2yrs", DoubleType(), True),
-        StructField("revol_util", DoubleType(), True),
-        StructField("total_acc", DoubleType(), True),
-        StructField("credit_length_in_years", DoubleType(), True),
-        StructField("term", StringType(), True),
-        StructField("home_ownership", StringType(), True),
-        StructField("purpose", StringType(), True),
-        StructField("verification_status", StringType(), True),
-        StructField("application_type", StringType(), True),
+        StructField("order_number", IntegerType(), True),
+        StructField("customer_id", IntegerType(), True),
+        StructField("customer_name", StringType(), True),
+        StructField("order_datetime_ts", TimestampType(), True),
+        StructField("order_date", DateType(), True),
+        StructField("state", StringType(), True),
+        StructField("city", StringType(), True),
+        StructField("loyalty_segment", StringType(), True),
+        StructField("product_name", StringType(), True),
+        StructField("price", DoubleType(), True),
+        StructField("quantity", IntegerType(), True),
+        StructField("line_total", DoubleType(), True),
         StructField("batch_id", IntegerType(), True),
         StructField("event_time", TimestampType(), True),
     ]
@@ -200,8 +232,8 @@ print("✅ Schema defined for streaming source")
 # Read streaming data from JSON files
 streaming_df = (
     spark.readStream.format("json")
-    .schema(loan_schema)
-    .option("maxFilesPerTrigger", 1)  # Process one file at a time
+    .schema(orders_schema)
+    .option("maxFilesPerTrigger", 1)
     .load(source_path)
 )
 
@@ -217,7 +249,7 @@ print(f"   Is streaming: {streaming_df.isStreaming}")
 
 # DBTITLE 1,Write Stream to Delta Table (Append Mode)
 # Define output table
-output_table = "loans_streaming"
+output_table = "orders_streaming"
 spark.sql(f"DROP TABLE IF EXISTS {output_table}")
 
 # Write streaming data to Delta table
@@ -297,38 +329,33 @@ print("✅ Streaming query stopped")
 
 # DBTITLE 1,Create Streaming Table with Liquid Clustering
 # Create table with liquid clustering
-clustered_table = "loans_streaming_clustered"
+clustered_table = "orders_streaming_clustered"
 spark.sql(f"DROP TABLE IF EXISTS {clustered_table}")
 
 # Create table with clustering
 spark.sql(f"""
     CREATE TABLE {clustered_table} (
-        loan_amnt INT,
-        funded_amnt INT,
-        paid_amnt DOUBLE,
-        addr_state STRING,
-        closed STRING,
-        annual_inc DOUBLE,
-        emp_length DOUBLE,
-        dti DOUBLE,
-        delinq_2yrs DOUBLE,
-        revol_util DOUBLE,
-        total_acc DOUBLE,
-        credit_length_in_years DOUBLE,
-        term STRING,
-        home_ownership STRING,
-        purpose STRING,
-        verification_status STRING,
-        application_type STRING,
+        order_number INT,
+        customer_id INT,
+        customer_name STRING,
+        order_datetime_ts TIMESTAMP,
+        order_date DATE,
+        state STRING,
+        city STRING,
+        loyalty_segment STRING,
+        product_name STRING,
+        price DOUBLE,
+        quantity INT,
+        line_total DOUBLE,
         batch_id INT,
         event_time TIMESTAMP
     )
     USING DELTA
-    CLUSTER BY (addr_state, term)
+    CLUSTER BY (state, product_name)
 """)
 
 print(f"✅ Created table with liquid clustering: {clustered_table}")
-print("✅ Clustered by: addr_state, term")
+print("✅ Clustered by: state, product_name")
 
 # COMMAND ----------
 
@@ -381,15 +408,15 @@ print("✅ Clustered streaming query stopped")
 # COMMAND ----------
 
 # DBTITLE 1,Create Streaming Aggregation with Windows
-# Calculate loan statistics per state in 1-minute windows
+# Calculate order statistics per state in 1-minute windows
 windowed_aggregation = (
-    streaming_df.withWatermark("event_time", "10 minutes")  # Handle late data
-    .groupBy(window(col("event_time"), "1 minute"), col("addr_state"))
+    streaming_df.withWatermark("event_time", "10 minutes")
+    .groupBy(window(col("event_time"), "1 minute"), col("state"))
     .agg(
-        count("*").alias("loan_count"),
-        round(avg("loan_amnt"), 2).alias("avg_loan_amount"),
-        round(sum("loan_amnt"), 2).alias("total_loan_amount"),
-        round(avg("annual_inc"), 2).alias("avg_income"),
+        count("*").alias("order_count"),
+        round(avg("line_total"), 2).alias("avg_order_value"),
+        round(sum("line_total"), 2).alias("total_revenue"),
+        round(avg("price"), 2).alias("avg_product_price"),
     )
 )
 
@@ -399,7 +426,7 @@ print("✅ Created windowed aggregation")
 
 # DBTITLE 1,Write Windowed Aggregation to Delta
 # Write aggregated results to Delta table
-agg_table = "loans_streaming_aggregates"
+agg_table = "orders_streaming_aggregates"
 spark.sql(f"DROP TABLE IF EXISTS {agg_table}")
 
 agg_query = (
@@ -424,13 +451,13 @@ display(
     SELECT 
         window.start as window_start,
         window.end as window_end,
-        addr_state,
-        loan_count,
-        avg_loan_amount,
-        total_loan_amount,
-        avg_income
+        state,
+        order_count,
+        avg_order_value,
+        total_revenue,
+        avg_product_price
     FROM {agg_table}
-    ORDER BY window_start DESC, total_loan_amount DESC
+    ORDER BY window_start DESC, total_revenue DESC
     LIMIT 20
 """)
 )
@@ -476,16 +503,14 @@ print("✅ Aggregation query stopped")
 # DBTITLE 1,Aggregation with Watermarking
 # Create aggregation with watermark for late data
 watermarked_agg = (
-    streaming_df.withWatermark(
-        "event_time", "10 minutes"
-    )  # Wait up to 10 min for late data
+    streaming_df.withWatermark("event_time", "10 minutes")
     .groupBy(
-        window(col("event_time"), "5 minutes", "1 minute"),  # 5-min window, 1-min slide
-        col("addr_state"),
+        window(col("event_time"), "5 minutes", "1 minute"),
+        col("state"),
     )
     .agg(
-        count("*").alias("loan_count"),
-        round(avg("loan_amnt"), 2).alias("avg_loan_amount"),
+        count("*").alias("order_count"),
+        round(avg("line_total"), 2).alias("avg_order_value"),
     )
 )
 
@@ -507,72 +532,71 @@ print("🪟 Window: 5 minutes (sliding every 1 minute)")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Second Streaming Source (Credit Scores)
-# Simulate credit score updates
-credit_scores = df.select(
-    col("loan_amnt"),
-    col("addr_state"),
+# DBTITLE 1,Create Second Streaming Source (Product Reviews)
+# Simulate product review ratings
+product_reviews = orders_exploded.select(
+    col("product_name"),
+    col("state"),
     col("event_time"),
-    (lit(300) + (rand() * 550)).cast("int").alias("credit_score"),
+    (lit(1) + (rand() * 4)).cast("int").alias("rating"),
 ).limit(2000)
 
-# Write credit scores as streaming source
-credit_path = f"{base_path}/credit_scores"
-dbutils.fs.rm(credit_path, recurse=True)
+# Write reviews as streaming source
+reviews_path = f"{base_path}/product_reviews"
+dbutils.fs.rm(reviews_path, recurse=True)
 
 for i in range(3):
-    batch = credit_scores.limit(500).withColumn("batch_id", lit(i))
-    batch.write.format("json").mode("overwrite").save(f"{credit_path}/batch_{i}")
-    print(f"✅ Wrote credit score batch {i}")
+    batch = product_reviews.limit(500).withColumn("batch_id", lit(i))
+    batch.write.format("json").mode("overwrite").save(f"{reviews_path}/batch_{i}")
+    print(f"✅ Wrote product review batch {i}")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Credit Score Stream
-# Define schema for credit scores
-credit_schema = StructType(
+# DBTITLE 1,Create Product Review Stream
+# Define schema for product reviews
+reviews_schema = StructType(
     [
-        StructField("loan_amnt", IntegerType(), True),
-        StructField("addr_state", StringType(), True),
+        StructField("product_name", StringType(), True),
+        StructField("state", StringType(), True),
         StructField("event_time", TimestampType(), True),
-        StructField("credit_score", IntegerType(), True),
+        StructField("rating", IntegerType(), True),
         StructField("batch_id", IntegerType(), True),
     ]
 )
 
-# Create streaming DataFrame for credit scores
-credit_stream = (
+# Create streaming DataFrame for product reviews
+reviews_stream = (
     spark.readStream.format("json")
-    .schema(credit_schema)
+    .schema(reviews_schema)
     .option("maxFilesPerTrigger", 1)
-    .load(credit_path)
+    .load(reviews_path)
 )
 
-print("✅ Created credit score stream")
+print("✅ Created product review stream")
 
 # COMMAND ----------
 
 # DBTITLE 1,Perform Stream-to-Stream Join
-# Join loan applications with credit scores
+# Join orders with product reviews
 joined_stream = (
     streaming_df.withWatermark("event_time", "10 minutes")
     .join(
-        credit_stream.withWatermark("event_time", "10 minutes"),
+        reviews_stream.withWatermark("event_time", "10 minutes"),
         expr("""
-            loan_amnt = credit_score.loan_amnt AND
-            addr_state = credit_score.addr_state AND
-            event_time >= credit_score.event_time - interval 5 minutes AND
-            event_time <= credit_score.event_time + interval 5 minutes
+            product_name = product_name AND
+            state = state AND
+            event_time >= event_time - interval 5 minutes AND
+            event_time <= event_time + interval 5 minutes
         """),
         "inner",
     )
     .select(
-        streaming_df["loan_amnt"],
-        streaming_df["funded_amnt"],
-        streaming_df["addr_state"],
-        streaming_df["annual_inc"],
-        streaming_df["term"],
-        streaming_df["purpose"],
-        credit_stream["credit_score"],
+        streaming_df["order_number"],
+        streaming_df["customer_name"],
+        streaming_df["product_name"],
+        streaming_df["line_total"],
+        streaming_df["state"],
+        reviews_stream["rating"],
         streaming_df["event_time"],
     )
 )
@@ -583,7 +607,7 @@ print("✅ Created stream-to-stream join")
 
 # DBTITLE 1,Write Joined Stream to Delta
 # Write enriched data to Delta table
-enriched_table = "loans_enriched"
+enriched_table = "orders_enriched"
 spark.sql(f"DROP TABLE IF EXISTS {enriched_table}")
 
 enriched_query = (
@@ -606,13 +630,12 @@ time.sleep(10)
 display(
     spark.sql(f"""
     SELECT 
-        loan_amnt,
-        funded_amnt,
-        addr_state,
-        annual_inc,
-        credit_score,
-        term,
-        purpose,
+        order_number,
+        customer_name,
+        product_name,
+        line_total,
+        state,
+        rating,
         event_time
     FROM {enriched_table}
     ORDER BY event_time DESC
@@ -650,11 +673,13 @@ print("✅ Enriched query stopped")
 
 # DBTITLE 1,Create Target Table for CDC
 # Create target table
-cdc_table = "loans_cdc_target"
+cdc_table = "orders_cdc_target"
 spark.sql(f"DROP TABLE IF EXISTS {cdc_table}")
 
 # Initialize with some data
-df.limit(5000).write.format("delta").mode("overwrite").saveAsTable(cdc_table)
+orders_exploded.limit(5000).write.format("delta").mode("overwrite").saveAsTable(
+    cdc_table
+)
 
 print(f"✅ Created CDC target table: {cdc_table}")
 print(f"📊 Initial record count: {spark.table(cdc_table).count():,}")
@@ -666,9 +691,9 @@ print(f"📊 Initial record count: {spark.table(cdc_table).count():,}")
 cdc_stream = streaming_df.withColumn(
     "operation", when(col("batch_id") % 2 == 0, lit("INSERT")).otherwise(lit("UPDATE"))
 ).withColumn(
-    "updated_paid_amnt",
-    when(col("operation") == "UPDATE", col("funded_amnt") * 0.5).otherwise(
-        col("paid_amnt")
+    "updated_line_total",
+    when(col("operation") == "UPDATE", col("line_total") * 0.95).otherwise(
+        col("line_total")
     ),
 )
 
@@ -686,9 +711,9 @@ def merge_cdc_batch(batch_df, batch_id):
     # Perform MERGE
     target_table.alias("target").merge(
         batch_df.alias("source"),
-        "target.loan_amnt = source.loan_amnt AND target.addr_state = source.addr_state",
+        "target.order_number = source.order_number AND target.state = source.state",
     ).whenMatchedUpdate(
-        set={"paid_amnt": "source.updated_paid_amnt", "closed": "source.closed"}
+        set={"line_total": "source.updated_line_total"}
     ).whenNotMatchedInsertAll().execute()
 
     print(f"✅ Merged batch {batch_id}")
@@ -717,9 +742,9 @@ print(f"📊 Final record count: {final_count:,}")
 # View some updated records
 display(
     spark.sql(f"""
-    SELECT loan_amnt, funded_amnt, paid_amnt, addr_state, closed
+    SELECT order_number, customer_name, product_name, line_total, state
     FROM {cdc_table}
-    WHERE paid_amnt > 0
+    WHERE line_total > 0
     LIMIT 20
 """)
 )

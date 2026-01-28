@@ -11,7 +11,7 @@
 # MAGIC ## 🎯 Learning Objectives
 # MAGIC
 # MAGIC By the end of this notebook, you will:
-# MAGIC - ✅ Load Parquet files into Spark DataFrames
+# MAGIC - ✅ Load JSON files into Spark DataFrames
 # MAGIC - ✅ Understand schema inference vs. explicit schemas
 # MAGIC - ✅ Perform data quality checks (nulls, duplicates, data types)
 # MAGIC - ✅ Apply basic transformations (filter, select, aggregate)
@@ -42,9 +42,6 @@
 # Reduce shuffle partitions for faster demos
 spark.conf.set("spark.sql.shuffle.partitions", "1")
 
-# Enable adaptive query execution
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-
 # Show more rows in display() output
 spark.conf.set("spark.sql.repl.eagerEval.maxNumRows", "20")
 
@@ -53,53 +50,51 @@ print("✅ Spark configured for demo environment")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 📥 Data Ingestion Fundamentals
+# MAGIC ### Why JSON?
 # MAGIC
-# MAGIC ### Why Parquet?
-# MAGIC
-# MAGIC **Parquet** is the gold standard for big data storage:
+# MAGIC **JSON** is a flexible, human-readable format for semi-structured data:
 # MAGIC
 # MAGIC | Feature | Benefit |
 # MAGIC |---------|---------|
-# MAGIC | 📦 **Columnar Storage** | Read only columns you need (faster queries) |
-# MAGIC | 🗜️ **Compression** | 10x smaller than CSV (saves storage & I/O) |
-# MAGIC | 📊 **Schema Embedded** | No need to specify data types manually |
-# MAGIC | 🚀 **Predicate Pushdown** | Skip irrelevant data (faster filters) |
-# MAGIC | 🔢 **Type Safety** | Preserves integers, decimals, dates correctly |
+# MAGIC | 📝 **Human Readable** | Easy to inspect and understand data structure |
+# MAGIC | 🔄 **Flexible Schema** | Handles nested objects and arrays naturally |
+# MAGIC | 🌐 **Universal Format** | Widely supported across all platforms |
+# MAGIC | 📊 **Self-Describing** | Field names included in every record |
+# MAGIC | 🔢 **Type Inference** | Spark automatically detects data types |
 # MAGIC
-# MAGIC ### Parquet vs. CSV
+# MAGIC ### JSON vs. CSV
 # MAGIC
 # MAGIC ```
-# MAGIC CSV:  Read entire file → Parse text → Convert types → Filter
-# MAGIC       ❌ Slow, memory-intensive
+# MAGIC CSV:  Flat structure only, requires header row, limited nesting
+# MAGIC       ❌ Not ideal for complex data
 # MAGIC
-# MAGIC Parquet: Read only needed columns → Already typed → Filter during read
-# MAGIC          ✅ Fast, efficient
+# MAGIC JSON: Supports nested objects, arrays, flexible schema
+# MAGIC       ✅ Perfect for real-world business data
 # MAGIC ```
 # MAGIC
-# MAGIC 📖 **Learn More**: [Parquet Documentation](https://parquet.apache.org/docs/)
+# MAGIC 📖 **Learn More**: [JSON Documentation](https://www.json.org/)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 📂 Loading Data from Parquet
+# MAGIC ## 📂 Loading Data from JSON
 # MAGIC
 # MAGIC ### Method 1: Schema Inference (Recommended for Exploration)
 
 # COMMAND ----------
 
-# DBTITLE 1,Load Parquet with Schema Inference
+# DBTITLE 1,Load JSON with Schema Inference
 # Define the dataset path
-dataset_path = "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
+dataset_path = "/databricks-datasets/retail-org/sales_orders/"
 
-# Load the Parquet file (schema is automatically inferred)
-df = spark.read.format("parquet").load(dataset_path)
+# Load the JSON files (schema is automatically inferred)
+df = spark.read.format("json").load(dataset_path)
 
 # Alternative shorthand syntax:
-# df = spark.read.parquet(dataset_path)
+# df = spark.read.json(dataset_path)
 
 print(f"✅ Loaded {df.count():,} records")
-print(f"✅ Schema inferred from Parquet metadata")
+print(f"✅ Schema inferred from JSON data")
 
 # COMMAND ----------
 
@@ -120,33 +115,35 @@ from pyspark.sql.types import (
     IntegerType,
     DoubleType,
     StringType,
+    ArrayType,
+    TimestampType,
 )
 
-# Define the schema explicitly
-loan_schema = StructType(
+# Define the schema explicitly for retail orders with nested products
+orders_schema = StructType(
     [
-        StructField("loan_amnt", IntegerType(), True),
-        StructField("funded_amnt", IntegerType(), True),
-        StructField("paid_amnt", DoubleType(), True),
-        StructField("addr_state", StringType(), True),
-        StructField("closed", StringType(), True),
-        StructField("annual_inc", DoubleType(), True),
-        StructField("emp_length", DoubleType(), True),
-        StructField("dti", DoubleType(), True),
-        StructField("delinq_2yrs", DoubleType(), True),
-        StructField("revol_util", DoubleType(), True),
-        StructField("total_acc", DoubleType(), True),
-        StructField("credit_length_in_years", DoubleType(), True),
-        StructField("term", StringType(), True),
-        StructField("home_ownership", StringType(), True),
-        StructField("purpose", StringType(), True),
-        StructField("verification_status", StringType(), True),
-        StructField("application_type", StringType(), True),
+        StructField("order_number", IntegerType(), True),
+        StructField("order_datetime", StringType(), True),
+        StructField("customer_id", StringType(), True),
+        StructField("customer_name", StringType(), True),
+        StructField(
+            "ordered_products",
+            ArrayType(
+                StructType(
+                    [
+                        StructField("name", StringType(), True),
+                        StructField("price", DoubleType(), True),
+                        StructField("qty", IntegerType(), True),
+                    ]
+                )
+            ),
+            True,
+        ),
     ]
 )
 
 # Load with explicit schema
-df_explicit = spark.read.format("parquet").schema(loan_schema).load(dataset_path)
+df_explicit = spark.read.format("json").schema(orders_schema).load(dataset_path)
 
 print("✅ Loaded with explicit schema")
 print(f"   Records: {df_explicit.count():,}")
@@ -238,10 +235,13 @@ display(df.summary())
 
 # COMMAND ----------
 
-# DBTITLE 1,Detailed Statistics for Key Columns
-# Focus on important numeric columns
-key_columns = ["loan_amnt", "funded_amnt", "paid_amnt", "annual_inc", "dti"]
-display(df.select(key_columns).describe())
+# DBTITLE 1,Explore Nested Structure
+# First, let's understand the nested ordered_products array
+print("Schema of the data:")
+df.printSchema()
+
+print("\nSample order with products:")
+display(df.select("order_number", "customer_name", "ordered_products").limit(3))
 
 # COMMAND ----------
 
@@ -259,11 +259,11 @@ print(f"📊 Total Records: {total_records:,}")
 # DBTITLE 1,Count by Categorical Columns
 from pyspark.sql.functions import count, col
 
-# Count loans by state
+# Count orders by state
 state_counts = (
-    df.groupBy("addr_state")
-    .agg(count("*").alias("loan_count"))
-    .orderBy(col("loan_count").desc())
+    df.groupBy("state")
+    .agg(count("*").alias("order_count"))
+    .orderBy(col("order_count").desc())
 )
 
 display(state_counts)
@@ -271,25 +271,25 @@ display(state_counts)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC 💡 **Visualization**: Click the bar chart icon above to see which states have the most loans!
+# MAGIC 💡 **Visualization**: Click the bar chart icon above to see which states have the most orders!
 
 # COMMAND ----------
 
-# DBTITLE 1,Count by Loan Term
-term_counts = df.groupBy("term").agg(count("*").alias("count")).orderBy("term")
-
-display(term_counts)
-
-# COMMAND ----------
-
-# DBTITLE 1,Count by Home Ownership
-ownership_counts = (
-    df.groupBy("home_ownership")
-    .agg(count("*").alias("count"))
-    .orderBy(col("count").desc())
+# DBTITLE 1,Count by Product
+product_counts = (
+    df.groupBy("product_id").agg(count("*").alias("count")).orderBy(col("count").desc())
 )
 
-display(ownership_counts)
+display(product_counts)
+
+# COMMAND ----------
+
+# DBTITLE 1,Count by City
+city_counts = (
+    df.groupBy("city").agg(count("*").alias("count")).orderBy(col("count").desc())
+)
+
+display(city_counts)
 
 # COMMAND ----------
 
@@ -369,19 +369,25 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Check for Invalid Numeric Values
-from pyspark.sql.functions import isnan, isnull
+from pyspark.sql.functions import isnan, isnull, size
 
-# Check for NaN and null in numeric columns
-numeric_columns = ["loan_amnt", "funded_amnt", "paid_amnt", "annual_inc", "dti"]
+# Check for null values in top-level columns
+top_level_columns = ["order_number", "customer_id", "ordered_products"]
 
-for col_name in numeric_columns:
-    nan_count = df.filter(isnan(col(col_name))).count()
+for col_name in top_level_columns:
     null_count = df.filter(isnull(col(col_name))).count()
 
-    if nan_count > 0 or null_count > 0:
-        print(f"⚠️  {col_name}: {nan_count} NaN, {null_count} NULL")
+    if null_count > 0:
+        print(f"⚠️  {col_name}: {null_count} NULL values")
     else:
-        print(f"✅ {col_name}: No NaN or NULL values")
+        print(f"✅ {col_name}: No NULL values")
+
+# Check for empty product arrays
+empty_arrays = df.filter(size(col("ordered_products")) == 0).count()
+if empty_arrays > 0:
+    print(f"⚠️  {empty_arrays} orders with no products")
+else:
+    print(f"✅ All orders have at least one product")
 
 # COMMAND ----------
 
@@ -390,30 +396,43 @@ for col_name in numeric_columns:
 
 # COMMAND ----------
 
-# DBTITLE 1,Check for Negative Loan Amounts
-# Loan amounts should be positive
-negative_loans = df.filter(col("loan_amnt") < 0).count()
+# DBTITLE 1,Check for Invalid Product Prices
+from pyspark.sql.functions import explode
 
-if negative_loans > 0:
-    print(f"⚠️  Warning: {negative_loans} records with negative loan amounts!")
+# Explode products to check individual prices
+products_df = df.select("order_number", explode("ordered_products").alias("product"))
+
+# Check for negative or zero prices
+invalid_prices = products_df.filter(col("product.price") <= 0).count()
+invalid_qty = products_df.filter(col("product.qty") <= 0).count()
+
+if invalid_prices > 0:
+    print(f"⚠️  Warning: {invalid_prices} products with invalid prices!")
 else:
-    print("✅ All loan amounts are positive")
+    print("✅ All product prices are positive")
+
+if invalid_qty > 0:
+    print(f"⚠️  Warning: {invalid_qty} products with invalid quantities!")
+else:
+    print("✅ All product quantities are positive")
 
 # COMMAND ----------
 
 # DBTITLE 1,Check for Unrealistic Values
-# Annual income should be reasonable (e.g., > $0 and < $10M)
-unrealistic_income = df.filter(
-    (col("annual_inc") <= 0) | (col("annual_inc") > 10000000)
+# Product prices should be reasonable (e.g., $1 to $10,000)
+unrealistic_prices = products_df.filter(
+    (col("product.price") < 1) | (col("product.price") > 10000)
 ).count()
 
-if unrealistic_income > 0:
-    print(f"⚠️  Warning: {unrealistic_income} records with unrealistic income!")
+if unrealistic_prices > 0:
+    print(f"⚠️  Warning: {unrealistic_prices} products with unrealistic prices!")
     display(
-        df.filter((col("annual_inc") <= 0) | (col("annual_inc") > 10000000)).limit(5)
+        products_df.filter(
+            (col("product.price") < 1) | (col("product.price") > 10000)
+        ).limit(5)
     )
 else:
-    print("✅ All income values are realistic")
+    print("✅ All product prices are realistic")
 
 # COMMAND ----------
 
@@ -424,13 +443,28 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,Select Specific Columns
-# Select only the columns we need
-loan_basics = df.select(
-    "loan_amnt", "funded_amnt", "paid_amnt", "addr_state", "term", "purpose"
+# DBTITLE 1,Working with Nested Data - Explode Products
+# Explode the ordered_products array to get one row per product
+from pyspark.sql.functions import explode
+
+products_expanded = df.select(
+    "order_number",
+    "order_datetime",
+    "customer_id",
+    "customer_name",
+    explode("ordered_products").alias("product"),
 )
 
-display(loan_basics.limit(10))
+products_with_total = products_expanded.select(
+    "order_number",
+    "customer_name",
+    col("product.name").alias("product_name"),
+    col("product.price").alias("price"),
+    col("product.qty").alias("quantity"),
+    (col("product.price") * col("product.qty")).alias("line_total"),
+)
+
+display(products_with_total.limit(10))
 
 # COMMAND ----------
 
@@ -439,25 +473,33 @@ display(loan_basics.limit(10))
 
 # COMMAND ----------
 
-# DBTITLE 1,Filter by Single Condition
-# Get loans from California
-ca_loans = df.filter(col("addr_state") == "CA")
+# DBTITLE 1,Filter Orders by Customer
+# Get orders from a specific customer
+customer_orders = df.filter(col("customer_id") == "C00001")
 
-print(f"📊 California Loans: {ca_loans.count():,}")
-display(ca_loans.limit(10))
+print(f"📊 Orders for customer C00001: {customer_orders.count():,}")
+display(
+    customer_orders.select("order_number", "customer_name", "ordered_products").limit(
+        10
+    )
+)
 
 # COMMAND ----------
 
-# DBTITLE 1,Filter by Multiple Conditions
-# Get large loans (>$20k) from California with 36-month term
-large_ca_loans = df.filter(
-    (col("addr_state") == "CA")
-    & (col("loan_amnt") > 20000)
-    & (col("term") == " 36 months")
+# DBTITLE 1,Filter Orders with Specific Products
+# Find orders containing products with price > $50
+from pyspark.sql.functions import exists
+
+expensive_product_orders = df.filter(
+    exists(col("ordered_products"), lambda p: p.price > 50)
 )
 
-print(f"📊 Large CA Loans (36-month): {large_ca_loans.count():,}")
-display(large_ca_loans.limit(10))
+print(f"📊 Orders with products priced > $50: {expensive_product_orders.count():,}")
+display(
+    expensive_product_orders.select(
+        "order_number", "customer_name", "ordered_products"
+    ).limit(10)
+)
 
 # COMMAND ----------
 
@@ -466,38 +508,36 @@ display(large_ca_loans.limit(10))
 
 # COMMAND ----------
 
-# DBTITLE 1,Calculate Loan Repayment Percentage
-from pyspark.sql.functions import round as spark_round
+# DBTITLE 1,Calculate Order Totals from Products
+from pyspark.sql.functions import round as spark_round, sum as spark_sum
 
-# Calculate what percentage of the loan has been repaid
-df_with_repayment = df.withColumn(
-    "repayment_pct", spark_round((col("paid_amnt") / col("funded_amnt")) * 100, 2)
+# Calculate total order value by summing all product line totals
+order_totals = products_with_total.groupBy("order_number", "customer_name").agg(
+    spark_sum("line_total").alias("order_total"), count("*").alias("num_products")
 )
 
+display(order_totals.limit(10))
+
 display(
-    df_with_repayment.select(
-        "loan_amnt", "funded_amnt", "paid_amnt", "repayment_pct"
-    ).limit(10)
+    df_with_margin.select("total", "discount", "tax", "profit_margin_pct").limit(10)
 )
 
 # COMMAND ----------
 
-# DBTITLE 1,Categorize Loans by Size
+# DBTITLE 1,Categorize Orders by Value
 from pyspark.sql.functions import when
 
-# Create loan size categories
-df_with_category = df.withColumn(
-    "loan_size_category",
-    when(col("loan_amnt") < 10000, "Small")
-    .when((col("loan_amnt") >= 10000) & (col("loan_amnt") < 20000), "Medium")
+order_totals_with_category = order_totals.withColumn(
+    "order_category",
+    when(col("order_total") < 100, "Small")
+    .when((col("order_total") >= 100) & (col("order_total") < 500), "Medium")
     .otherwise("Large"),
 )
 
-# Count by category
 category_counts = (
-    df_with_category.groupBy("loan_size_category")
+    order_totals_with_category.groupBy("order_category")
     .agg(count("*").alias("count"))
-    .orderBy("loan_size_category")
+    .orderBy("order_category")
 )
 
 display(category_counts)
@@ -509,7 +549,7 @@ display(category_counts)
 
 # COMMAND ----------
 
-# DBTITLE 1,Aggregate by State
+# DBTITLE 1,Aggregate by Product
 from pyspark.sql.functions import (
     avg,
     sum as spark_sum,
@@ -517,36 +557,34 @@ from pyspark.sql.functions import (
     max as spark_max,
 )
 
-# Calculate statistics by state
-state_stats = (
-    df.groupBy("addr_state")
+product_stats = (
+    products_with_total.groupBy("product_name")
     .agg(
-        count("*").alias("loan_count"),
-        spark_round(avg("loan_amnt"), 2).alias("avg_loan_amount"),
-        spark_round(spark_sum("loan_amnt"), 2).alias("total_loan_amount"),
-        spark_min("loan_amnt").alias("min_loan_amount"),
-        spark_max("loan_amnt").alias("max_loan_amount"),
+        count("*").alias("times_ordered"),
+        spark_round(avg("price"), 2).alias("avg_price"),
+        spark_round(spark_sum("line_total"), 2).alias("total_revenue"),
+        spark_round(avg("quantity"), 2).alias("avg_qty"),
     )
-    .orderBy(col("loan_count").desc())
+    .orderBy(col("total_revenue").desc())
 )
 
-display(state_stats.limit(10))
+display(product_stats.limit(10))
 
 # COMMAND ----------
 
-# DBTITLE 1,Aggregate by Loan Purpose
-# Calculate average loan amount by purpose
-purpose_stats = (
-    df.groupBy("purpose")
+# DBTITLE 1,Aggregate by Customer
+customer_stats = (
+    df.groupBy("customer_id", "customer_name")
     .agg(
-        count("*").alias("count"),
-        spark_round(avg("loan_amnt"), 2).alias("avg_amount"),
-        spark_round(avg("annual_inc"), 2).alias("avg_income"),
+        count("*").alias("num_orders"),
+        spark_round(avg(size(col("ordered_products"))), 2).alias(
+            "avg_products_per_order"
+        ),
     )
-    .orderBy(col("count").desc())
+    .orderBy(col("num_orders").desc())
 )
 
-display(purpose_stats)
+display(customer_stats.limit(10))
 
 # COMMAND ----------
 
@@ -557,18 +595,19 @@ display(purpose_stats)
 
 # COMMAND ----------
 
-# DBTITLE 1,Loan Amount Distribution
-# Create bins for loan amounts
+# DBTITLE 1,Order Value Distribution
 from pyspark.sql.functions import floor
 
-loan_distribution = (
-    df.withColumn("amount_bin", (floor(col("loan_amnt") / 5000) * 5000).cast("int"))
-    .groupBy("amount_bin")
+order_distribution = (
+    order_totals.withColumn(
+        "value_bin", (floor(col("order_total") / 100) * 100).cast("int")
+    )
+    .groupBy("value_bin")
     .agg(count("*").alias("count"))
-    .orderBy("amount_bin")
+    .orderBy("value_bin")
 )
 
-display(loan_distribution)
+display(order_distribution)
 
 # COMMAND ----------
 
@@ -577,13 +616,12 @@ display(loan_distribution)
 
 # COMMAND ----------
 
-# DBTITLE 1,Income vs. Loan Amount
-# Analyze relationship between income and loan amount
-income_loan = df.select(
-    spark_round(col("annual_inc"), -3).alias("income_rounded"), "loan_amnt"
-).filter((col("annual_inc") > 0) & (col("annual_inc") < 200000))
+# DBTITLE 1,Product Price vs Quantity Ordered
+price_qty = products_with_total.select(
+    "product_name", "price", "quantity", "line_total"
+).filter((col("price") > 0) & (col("quantity") > 0))
 
-display(income_loan.limit(1000))
+display(price_qty.limit(1000))
 
 # COMMAND ----------
 
@@ -592,15 +630,10 @@ display(income_loan.limit(1000))
 
 # COMMAND ----------
 
-# DBTITLE 1,Top 10 States by Total Loan Volume
-top_states = (
-    df.groupBy("addr_state")
-    .agg(spark_round(spark_sum("loan_amnt") / 1000000, 2).alias("total_millions"))
-    .orderBy(col("total_millions").desc())
-    .limit(10)
-)
+# DBTITLE 1,Top 10 Products by Revenue
+top_products = product_stats.orderBy(col("total_revenue").desc()).limit(10)
 
-display(top_states)
+display(top_products)
 
 # COMMAND ----------
 
@@ -629,11 +662,11 @@ display(top_states)
 # MAGIC
 # MAGIC ```python
 # MAGIC # ❌ Bad: Read entire dataset then filter
-# MAGIC df = spark.read.parquet(path)
+# MAGIC df = spark.read.json(path)
 # MAGIC filtered = df.filter(col("state") == "CA")
 # MAGIC
 # MAGIC # ✅ Good: Use predicate pushdown
-# MAGIC df = spark.read.parquet(path).filter(col("state") == "CA")
+# MAGIC df = spark.read.json(path).filter(col("state") == "CA")
 # MAGIC ```
 # MAGIC
 # MAGIC ### 4. Memory Management
@@ -662,31 +695,32 @@ display(top_states)
 # MAGIC ### What We Covered
 # MAGIC
 # MAGIC ✅ **Data Ingestion**
-# MAGIC - Loaded Parquet files with schema inference and explicit schemas
-# MAGIC - Understood the benefits of Parquet over CSV
+# MAGIC - Loaded JSON files with nested structures (arrays of structs)
+# MAGIC - Defined explicit schemas for complex nested data
 # MAGIC
 # MAGIC ✅ **Schema Exploration**
-# MAGIC - Inspected data types and column structure
-# MAGIC - Analyzed schema composition
+# MAGIC - Inspected nested data types and array structures
+# MAGIC - Understood how to work with complex schemas
 # MAGIC
 # MAGIC ✅ **Data Quality**
-# MAGIC - Checked for nulls, duplicates, and invalid values
-# MAGIC - Validated data ranges and types
+# MAGIC - Checked for nulls and empty arrays
+# MAGIC - Validated nested field values (prices, quantities)
 # MAGIC
 # MAGIC ✅ **Transformations**
-# MAGIC - Selected, filtered, and aggregated data
-# MAGIC - Created calculated columns and categories
+# MAGIC - Used `explode()` to flatten nested arrays
+# MAGIC - Calculated derived values (line totals from price × qty)
+# MAGIC - Aggregated across nested structures
 # MAGIC
 # MAGIC ✅ **Visualizations**
-# MAGIC - Used `display()` for interactive tables and charts
-# MAGIC - Analyzed distributions and relationships
+# MAGIC - Analyzed product-level and order-level metrics
+# MAGIC - Explored customer and product statistics
 # MAGIC
 # MAGIC ### Key Takeaways
 # MAGIC
-# MAGIC 💡 **Parquet** = Columnar, compressed, schema-embedded (perfect for big data)
-# MAGIC 💡 **Schema inference** = Fast exploration, explicit schemas = Production safety
-# MAGIC 💡 **Data quality** = Always check nulls, duplicates, and value ranges
-# MAGIC 💡 **display()** = Databricks magic for interactive visualizations
+# MAGIC 💡 **Nested JSON** = Real-world data with arrays and structs (orders → products)
+# MAGIC 💡 **explode()** = Flatten arrays to work with individual elements
+# MAGIC 💡 **Explicit schemas** = Essential for complex nested structures
+# MAGIC 💡 **Derived calculations** = Compute values from nested fields (price × qty)
 # MAGIC
 # MAGIC ### Next Steps
 # MAGIC

@@ -4,7 +4,7 @@
 # MAGIC
 # MAGIC **Level**: Beginner
 # MAGIC **Duration**: 20 minutes
-# MAGIC **Dataset**: Lending Club Loan Data (14,705 records)
+# MAGIC **Dataset**: Retail-Org Sales Data (100K+ orders)
 # MAGIC
 # MAGIC ---
 # MAGIC
@@ -13,7 +13,7 @@
 # MAGIC By the end of this notebook, you will:
 # MAGIC - ✅ Understand the tutorial series structure and learning path
 # MAGIC - ✅ Know what Databricks and Delta Lake are and why they matter
-# MAGIC - ✅ Explore the Lending Club dataset we'll use throughout
+# MAGIC - ✅ Explore the Retail-Org dataset we'll use throughout
 # MAGIC - ✅ Verify your environment is ready for the tutorials
 # MAGIC - ✅ Access key documentation resources
 # MAGIC
@@ -118,43 +118,49 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 💰 About the Lending Club Dataset
+# MAGIC ## 🛒 About the Retail-Org Dataset
 # MAGIC
-# MAGIC ### What is Lending Club?
+# MAGIC ### What is Retail-Org?
 # MAGIC
-# MAGIC **Lending Club** was a peer-to-peer lending platform where investors funded personal loans. This dataset contains **real loan data** with risk classifications.
+# MAGIC The **retail-org** dataset contains e-commerce sales and customer data from a fictional online retail company.
 # MAGIC
 # MAGIC ### Dataset Details
 # MAGIC
 # MAGIC | Property | Value |
 # MAGIC |----------|-------|
-# MAGIC | **Records** | 14,705 loans |
-# MAGIC | **Format** | Parquet (Snappy compressed) |
-# MAGIC | **Size** | ~1.5 MB |
-# MAGIC | **Location** | `/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet` |
-# MAGIC | **Source** | Learning Spark V2 book |
+# MAGIC | **Records** | ~100K+ sales orders |
+# MAGIC | **Format** | JSON (sales_orders), CSV (customers) |
+# MAGIC | **Location** | `/databricks-datasets/retail-org/` |
+# MAGIC | **Tables** | `sales_orders`, `customers` |
 # MAGIC
-# MAGIC ### Key Fields
+# MAGIC ### Key Fields - Sales Orders
 # MAGIC
 # MAGIC | Field | Description | Example |
 # MAGIC |-------|-------------|---------|
-# MAGIC | `loan_amnt` | Loan amount requested | $10,000 |
-# MAGIC | `funded_amnt` | Amount funded by investors | $10,000 |
-# MAGIC | `paid_amnt` | Amount paid back | $8,500 |
-# MAGIC | `addr_state` | Borrower's state | CA, NY, TX |
-# MAGIC | `annual_inc` | Annual income | $75,000 |
-# MAGIC | `dti` | Debt-to-income ratio | 18.5% |
-# MAGIC | `term` | Loan term | 36 months, 60 months |
-# MAGIC | `home_ownership` | Housing status | RENT, OWN, MORTGAGE |
-# MAGIC | `purpose` | Loan purpose | debt_consolidation, credit_card |
+# MAGIC | `order_number` | Unique order ID | 1000001 |
+# MAGIC | `order_datetime` | Order timestamp | "2019-03-11T10:30:25.00Z" |
+# MAGIC | `customer_id` | Customer identifier | "C00001" |
+# MAGIC | `customer_name` | Customer name | "John Smith" |
+# MAGIC | `ordered_products` | Array of products in order | [struct, struct, ...] |
+# MAGIC | `ordered_products.name` | Product name | "Widget A" |
+# MAGIC | `ordered_products.price` | Unit price | 25 |
+# MAGIC | `ordered_products.qty` | Quantity ordered | 2 |
+# MAGIC
+# MAGIC ### Key Fields - Customers
+# MAGIC
+# MAGIC | Field | Description | Example |
+# MAGIC |-------|-------------|---------|
+# MAGIC | `customer_id` | Unique customer ID | C12345 |
+# MAGIC | `state` | Customer state | CA |
+# MAGIC | `loyalty_segment` | Customer tier | Gold, Silver, Bronze |
 # MAGIC
 # MAGIC ### Why This Dataset?
 # MAGIC
-# MAGIC ✅ **Built-in**: No downloads required
-# MAGIC ✅ **Real-world**: Actual financial data
-# MAGIC ✅ **Perfect size**: Large enough to be interesting, small enough to run fast
-# MAGIC ✅ **Rich features**: Numeric, categorical, and text fields
-# MAGIC ✅ **Industry-standard**: Used in 50+ Databricks tutorials
+# MAGIC ✅ **Built-in to Databricks** (no download required)
+# MAGIC ✅ **Realistic business data** (orders, customers, products)
+# MAGIC ✅ **Multiple tables** for joins and relationships
+# MAGIC ✅ **Perfect size** for learning (~50MB)
+# MAGIC ✅ **Commonly used** in official Databricks tutorials
 
 # COMMAND ----------
 
@@ -166,20 +172,20 @@
 # COMMAND ----------
 
 # DBTITLE 1,Check Spark Version
+import sys
+
 print(f"✅ Spark Version: {spark.version}")
-print(
-    f"✅ Python Version: {spark.conf.get('spark.executorEnv.PYTHONHASHSEED', 'default')}"
-)
+print(f"✅ Python Version: {sys.version.split()[0]}")
 
 # COMMAND ----------
 
 # DBTITLE 1,Verify Dataset Access
-# Check if the Lending Club dataset exists
-dataset_path = "/databricks-datasets/learning-spark-v2/loans/loan-risks.snappy.parquet"
+# Check if the Retail-Org dataset exists
+dataset_path = "/databricks-datasets/retail-org/sales_orders/"
 
 try:
     # Try to read the dataset
-    df = spark.read.format("parquet").load(dataset_path)
+    df = spark.read.json(dataset_path)
     record_count = df.count()
     column_count = len(df.columns)
 
@@ -246,16 +252,19 @@ display(df.limit(5))
 
 # COMMAND ----------
 
-# DBTITLE 1,Set Demo Configuration
-# Reduce shuffle partitions for faster demos (default is 200)
-spark.conf.set("spark.sql.shuffle.partitions", "1")
+# DBTITLE 1,Configure Spark (Optional)
+# Note: Databricks Runtime comes pre-configured with optimal settings
+# These overrides are optional for demo environments
 
-# Enable adaptive query execution (AQE) for better performance
-spark.conf.set("spark.sql.adaptive.enabled", "true")
+print("ℹ️  Databricks Runtime includes pre-optimized Spark configurations")
+print("✅ No manual configuration needed for this tutorial")
 
-print("✅ Configuration set for demo environment")
-print(f"   Shuffle partitions: {spark.conf.get('spark.sql.shuffle.partitions')}")
-print(f"   Adaptive query execution: {spark.conf.get('spark.sql.adaptive.enabled')}")
+# Optional: Reduce partitions for small demo datasets
+try:
+    current = spark.conf.get("spark.sql.shuffle.partitions")
+    print(f"📊 Current shuffle partitions: {current}")
+except:
+    print("📊 Using default shuffle partitions")
 
 # COMMAND ----------
 
@@ -276,24 +285,22 @@ print(f"   Adaptive query execution: {spark.conf.get('spark.sql.adaptive.enabled
 
 # DBTITLE 1,Summary Statistics
 # Get basic statistics for numeric columns
-display(
-    df.select("loan_amnt", "funded_amnt", "paid_amnt", "annual_inc", "dti").summary()
-)
+display(df.select("order_number", "number_of_line_items").summary())
 
 # COMMAND ----------
 
-# DBTITLE 1,Loan Distribution by State
-# See which states have the most loans
+# DBTITLE 1,Orders by Customer
+# See which customers have the most orders
 from pyspark.sql.functions import count, col
 
-state_distribution = (
-    df.groupBy("addr_state")
-    .agg(count("*").alias("loan_count"))
-    .orderBy(col("loan_count").desc())
+customer_distribution = (
+    df.groupBy("customer_id", "customer_name")
+    .agg(count("*").alias("order_count"))
+    .orderBy(col("order_count").desc())
     .limit(10)
 )
 
-display(state_distribution)
+display(customer_distribution)
 
 # COMMAND ----------
 
@@ -302,15 +309,47 @@ display(state_distribution)
 
 # COMMAND ----------
 
-# DBTITLE 1,Loan Purpose Breakdown
-# What are people borrowing money for?
-from pyspark.sql.functions import count
+# DBTITLE 1,Top Products Ordered
+# What products are customers ordering? (explode nested array)
+from pyspark.sql.functions import count, explode
 
-purpose_breakdown = (
-    df.groupBy("purpose").agg(count("*").alias("count")).orderBy(col("count").desc())
+product_breakdown = (
+    df.select(explode("ordered_products").alias("product"))
+    .groupBy("product.name")
+    .agg(count("*").alias("order_count"))
+    .orderBy(col("order_count").desc())
+    .limit(10)
 )
 
-display(purpose_breakdown)
+display(product_breakdown)
+
+# COMMAND ----------
+
+# DBTITLE 1,Calculate Order Totals (Nested Array Example)
+# Working with nested arrays: explode products and calculate line totals
+from pyspark.sql.functions import explode, sum as _sum
+
+df_exploded = df.select(
+    "order_number",
+    "customer_id",
+    "customer_name",
+    "order_datetime",
+    explode("ordered_products").alias("product"),
+)
+
+df_with_line_total = df_exploded.withColumn(
+    "line_total", col("product.price") * col("product.qty")
+)
+
+order_totals = (
+    df_with_line_total.groupBy(
+        "order_number", "customer_id", "customer_name", "order_datetime"
+    )
+    .agg(_sum("line_total").alias("order_total"))
+    .orderBy(col("order_total").desc())
+)
+
+display(order_totals.limit(10))
 
 # COMMAND ----------
 
@@ -393,7 +432,7 @@ display(purpose_breakdown)
 # MAGIC ✅ **Tutorial series structure** – 6 notebooks from beginner to advanced
 # MAGIC ✅ **Databricks platform** – Unified analytics with managed Spark
 # MAGIC ✅ **Delta Lake benefits** – ACID transactions, time travel, schema enforcement
-# MAGIC ✅ **Lending Club dataset** – 14,705 real loan records
+# MAGIC ✅ **Retail-Org dataset** – 100K+ e-commerce sales orders
 # MAGIC ✅ **Environment verification** – Confirmed dataset access and Spark version
 # MAGIC ✅ **Quick exploration** – Previewed data and created simple visualizations
 # MAGIC
@@ -402,7 +441,7 @@ display(purpose_breakdown)
 # MAGIC 💡 **Databricks** = Managed Spark platform for data engineering
 # MAGIC 💡 **Delta Lake** = Parquet + transaction log = reliable data lake
 # MAGIC 💡 **display()** = Databricks function for interactive visualizations
-# MAGIC 💡 **Lending Club data** = Perfect dataset for learning data engineering
+# MAGIC 💡 **Retail-Org data** = Perfect dataset for learning data engineering
 # MAGIC
 # MAGIC ### Next Steps
 # MAGIC
